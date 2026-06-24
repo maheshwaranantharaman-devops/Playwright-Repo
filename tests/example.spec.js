@@ -9,8 +9,3 @@ test('Launching amazon',  async({page})=>{
   await page.screenshot({path:'./screenshot1.png'});
 });
 
-test('Select Scenarios Execution', async({page})=>{
-    await page.goto('https://www.amazon.com/');
-    await page.screenshot({path: './selectScenario.png'})
-});
-
