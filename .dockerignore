@@ -1,0 +1,9 @@
+node_modules
+playwright-report
+test-results
+record
+.github
+.git
+Dockerfile
+docker-compose.yml
+*.log

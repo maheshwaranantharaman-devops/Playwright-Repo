@@ -1,0 +1,123 @@
+name: Cloud Playwright Execution
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: 'Cloud provider to execute the GHCR image'
+        required: true
+        type: choice
+        options:
+          - aws
+          - azure
+          - gcp
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/playwright-demo
+  IMAGE_TAG: ${{ github.sha }}
+  FULL_IMAGE_NAME: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - name: Build Docker image
+        run: docker build --tag $FULL_IMAGE_NAME .
+      - name: Authenticate to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Push Docker image
+        run: docker push $FULL_IMAGE_NAME
+
+  run-on-cloud:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Execute on AWS ECS
+        if: ${{ github.event.inputs.provider == 'aws' }}
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      - name: Run AWS ECS task
+        if: ${{ github.event.inputs.provider == 'aws' }}
+        run: |
+          aws logs create-log-group --log-group-name /ecs/playwright-demo || true
+          TASK_DEF=$(cat <<'EOF'
+          {
+            "family": "playwright-demo-job",
+            "networkMode": "awsvpc",
+            "requiresCompatibilities": ["FARGATE"],
+            "cpu": "1024",
+            "memory": "2048",
+            "executionRoleArn": "${{ secrets.AWS_ECS_EXECUTION_ROLE_ARN }}",
+            "containerDefinitions": [
+              {
+                "name": "playwright-test",
+                "image": "${FULL_IMAGE_NAME}",
+                "essential": true,
+                "logConfiguration": {
+                  "logDriver": "awslogs",
+                  "options": {
+                    "awslogs-group": "/ecs/playwright-demo",
+                    "awslogs-region": "${{ secrets.AWS_REGION }}",
+                    "awslogs-stream-prefix": "playwright"
+                  }
+                }
+              }
+            ]
+          }
+          EOF
+          )
+          echo "$TASK_DEF" > task-def.json
+          aws ecs register-task-definition --cli-input-json file://task-def.json
+          TASK_ARN=$(aws ecs run-task --cluster "${{ secrets.AWS_ECS_CLUSTER }}" --launch-type FARGATE --network-configuration "awsvpcConfiguration={subnets=[${{ secrets.AWS_ECS_SUBNETS }}],securityGroups=[${{ secrets.AWS_ECS_SECURITY_GROUPS }}],assignPublicIp=ENABLED}" --task-definition playwright-demo-job --query 'tasks[0].taskArn' --output text)
+          echo "ECS task started: $TASK_ARN"
+          aws ecs wait tasks-stopped --cluster "${{ secrets.AWS_ECS_CLUSTER }}" --tasks "$TASK_ARN"
+          LOG_STREAM=$(aws logs describe-log-streams --log-group-name /ecs/playwright-demo --log-stream-name-prefix playwright --order-by LastEventTime --descending --limit 1 --query 'logStreams[0].logStreamName' --output text)
+          aws logs get-log-events --log-group-name /ecs/playwright-demo --log-stream-name "$LOG_STREAM" --start-from-head --output text
+
+      - name: Execute on Azure
+        if: ${{ github.event.inputs.provider == 'azure' }}
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Run Azure Container Instance
+        if: ${{ github.event.inputs.provider == 'azure' }}
+        run: |
+          az group create --name "${{ secrets.AZURE_RESOURCE_GROUP }}" --location "${{ secrets.AZURE_REGION }}"
+          az container create \
+            --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+            --name playwright-test \
+            --image $FULL_IMAGE_NAME \
+            --restart-policy Never \
+            --cpu 2 \
+            --memory 4 \
+            --registry-login-server ghcr.io \
+            --registry-username "${{ github.actor }}" \
+            --registry-password "${{ secrets.GITHUB_TOKEN }}"
+          az container logs --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" --name playwright-test
+
+      - name: Authenticate to GCP
+        if: ${{ github.event.inputs.provider == 'gcp' }}
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: '${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}'
+      - name: Run GCP Cloud Run Job
+        if: ${{ github.event.inputs.provider == 'gcp' }}
+        run: |
+          gcloud config set project "${{ secrets.GCP_PROJECT_ID }}"
+          gcloud config set run/region "${{ secrets.GCP_REGION }}"
+          if ! gcloud beta run jobs describe playwright-test-job >/dev/null 2>&1; then
+            gcloud beta run jobs create playwright-test-job --image $FULL_IMAGE_NAME --region "${{ secrets.GCP_REGION }}" --task-timeout=3600s --max-retries=0
+          fi
+          gcloud beta run jobs execute playwright-test-job --region "${{ secrets.GCP_REGION }}" --wait
+          gcloud beta run jobs logs playwright-test-job --region "${{ secrets.GCP_REGION }}"
