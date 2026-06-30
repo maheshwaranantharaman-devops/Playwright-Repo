@@ -1,10 +1,6 @@
 pipeline {
     agent any
 
-    tools {
-        nodejs 'NodeJS_20'   // Use your configured NodeJS tool name
-    }
-
     stages {
         stage('Cleanup Workspace') {
             steps {
