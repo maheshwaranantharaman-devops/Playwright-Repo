@@ -1,35 +1,56 @@
 pipeline {
-  agent any
+    agent any
 
-  environment {
-    CI = 'true'
-  }
-
-  stages {
-    stage('Install dependencies') {
-      steps {
-        bat 'npm ci'
-        bat 'npx playwright install --with-deps'
-      }
+    tools {
+        nodejs 'NodeJS_20'   // Use your configured NodeJS tool name
     }
 
-    stage('Run Playwright tests') {
-      steps {
-        bat 'npm run test:ci'
-      }
+    stages {
+        stage('Cleanup Workspace') {
+            steps {
+                // Kill lingering processes before cleanup
+                bat 'taskkill /F /IM node.exe /T || exit 0'
+                bat 'taskkill /F /IM java.exe /T || exit 0'
+                cleanWs()  // Jenkins pipeline workspace cleanup
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                bat 'npm install'
+            }
+        }
+
+        stage('Run Tests') {
+            steps {
+                // Run Playwright tests with Allure reporter
+                bat 'npx playwright test --reporter=line,allure-playwright'
+            }
+        }
+
+        stage('Generate Allure Report') {
+            steps {
+                bat '"%ALLURE_HOME%\\bin\\allure.bat" generate -c -o allure-report'
+            }
+        }
+
+        stage('Publish Allure Report') {
+            steps {
+                allure([
+                    includeProperties: false,
+                    jdk: '',
+                    results: [[path: 'allure-results']]
+                ])
+            }
+        }
     }
 
-    stage('Generate Allure report') {
-      steps {
-        bat 'if exist allure-results (echo allure-results exists) else (echo allure-results missing)'
-        bat 'allure generate allure-results -o "%WORKSPACE%\\allure-report" --clean'
-      }
+    post {
+        always {
+            archiveArtifacts artifacts: 'allure-report/**', fingerprint: true
+        }
+        failure {
+            echo 'Build failed — check cleanup or test execution logs.'
+        }
     }
-  }
-
-  post {
-    always {
-      archiveArtifacts artifacts: 'allure-report/**', allowEmptyArchive: true
-    }
-  }
 }
